@@ -1,0 +1,88 @@
+name: Build APK from editable project
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Validate Gradle Wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s gradle/wrapper/gradle-wrapper.jar
+          test -s gradle/wrapper/gradle-wrapper.properties
+          test -f app/src/main/AndroidManifest.xml
+          chmod +x ./gradlew
+          ./gradlew --version
+
+      - name: Configure memory for large resource sets
+        shell: bash
+        run: |
+          set -euo pipefail
+          touch gradle.properties
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("gradle.properties")
+          lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+          keys = {
+              "org.gradle.jvmargs": "-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8",
+              "org.gradle.workers.max": "2",
+              "org.gradle.parallel": "false",
+          }
+          lines = [line for line in lines if not any(line.strip().startswith(k + "=") for k in keys)]
+          lines.extend(f"{k}={v}" for k, v in keys.items())
+          p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Compile debug APK
+        shell: bash
+        run: ./gradlew --no-daemon --max-workers=2 --stacktrace :app:assembleDebug
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebuilt-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            **/build/reports/**
+            **/build/outputs/logs/**
+          if-no-files-found: ignore
+          retention-days: 7
